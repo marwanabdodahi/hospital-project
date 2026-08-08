@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy
+python-jose
+passlib[bcrypt]
+redis
+pytest
+httpx
