@@ -68,6 +68,32 @@ user, and checks the role before the request handler runs.
 - Python 3.13 or later
 - Redis (optional — if it is not running, caching is skipped and the API works normally)
 
+---
+
+### Option A — One-click launch (recommended)
+
+The repository includes a launch script for each platform. Each one creates the virtual
+environment if it is missing, installs the dependencies, opens the API documentation in
+your browser, and starts the server.
+
+| Platform | Script | How to run |
+|----------|--------|-----------|
+| Windows | `run_windows.bat` | Double-click the file |
+| macOS | `تشغيل_المشروع.command` | Double-click the file |
+
+> **macOS note:** if the file does not open on first use, run
+> `chmod +x تشغيل_المشروع.command` once in Terminal, or right-click the file and choose
+> **Open**.
+
+> **Windows note:** if Windows SmartScreen blocks the script, choose **More info** →
+> **Run anyway**. If Python is not found, install it from
+> [python.org](https://www.python.org/downloads/) and make sure **Add Python to PATH** is
+> checked during setup.
+
+---
+
+### Option B — Manual setup
+
 ### 1. Clone the repository
 
 ```bash
@@ -201,6 +227,8 @@ hospital-project/
 │   └── monitor.py        # Request metrics
 ├── tests/
 │   └── test_auth.py      # Functional tests
+├── run_windows.bat       # One-click launcher (Windows)
+├── تشغيل_المشروع.command  # One-click launcher (macOS)
 ├── requirements.txt
 └── README.md
 ```

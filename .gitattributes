@@ -1,0 +1,11 @@
+# Keep line endings correct for each platform's launcher.
+# Windows batch files require CRLF; shell scripts require LF.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.command   text eol=lf
+*.sh        text eol=lf
+
+# Normalize everything else.
+*.py        text
+*.md        text
+*.txt       text
