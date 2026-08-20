@@ -1,7 +1,7 @@
 import threading
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
 from app.auth import hash_password, verify_password, create_token
@@ -20,6 +20,16 @@ from app.schemas import (
 )
 
 router = APIRouter()
+
+# SQLite stores a 64-bit integer. Anything larger raises OverflowError on bind,
+# so ids are bounded here and rejected with 422 instead of a server error.
+MAX_ID = 2 ** 63 - 1
+
+
+def IdParam():
+    """A path id bounded to what SQLite can store. A fresh instance is needed
+    per parameter, since FastAPI binds the parameter name onto the object."""
+    return Path(ge=1, le=MAX_ID)
 
 # The overlap check reads the table and then writes to it. Two requests that
 # arrive together can both read "the slot is free" before either writes, so the
@@ -129,7 +139,7 @@ def book(
 
 @router.delete("/appointments/{appointment_id}")
 def cancel_appointment(
-    appointment_id: int,
+    appointment_id: int = IdParam(),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -165,8 +175,8 @@ def cancel_appointment(
 
 @router.put("/appointments/{appointment_id}/status")
 def update_status(
-    appointment_id: int,
     data: StatusUpdate,
+    appointment_id: int = IdParam(),
     db: Session = Depends(get_db),
     doctor: User = Depends(role_required("doctor")),
 ):
@@ -225,7 +235,7 @@ def all_appointments(
 
 @router.get("/doctors/{doctor_id}/appointments")
 def doctor_schedule(
-    doctor_id: int,
+    doctor_id: int = IdParam(),
     db: Session = Depends(get_db),
     doctor: User = Depends(role_required("doctor")),
 ):
@@ -246,7 +256,7 @@ def doctor_schedule(
 
 @router.get("/patients/{patient_id}/appointments")
 def patient_schedule(
-    patient_id: int,
+    patient_id: int = IdParam(),
     db: Session = Depends(get_db),
     patient: User = Depends(role_required("patient")),
 ):
@@ -292,7 +302,7 @@ def get_patients(
 
 @router.get("/patients/{patient_id}", response_model=UserOut,
             dependencies=[Depends(role_required("admin"))])
-def get_patient_by_id(patient_id: int, db: Session = Depends(get_db)):
+def get_patient_by_id(patient_id: int = IdParam(), db: Session = Depends(get_db)):
     patient = db.query(User).filter(User.id == patient_id, User.role == "patient").first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -321,11 +331,21 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
     return {"msg": "created", "id": user.id}
 
 
-@router.delete("/admin/users/{user_id}", dependencies=[Depends(role_required("admin"))])
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+@router.delete("/admin/users/{user_id}")
+def delete_user(
+    user_id: int = IdParam(),
+    db: Session = Depends(get_db),
+    admin: User = Depends(role_required("admin")),
+):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+
+    if user.role == "admin" and db.query(User).filter(User.role == "admin").count() <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last administrator")
 
     # Remove their appointments first so no row is left pointing at a missing user.
     removed = db.query(Appointment).filter(
