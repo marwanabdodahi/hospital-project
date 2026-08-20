@@ -75,3 +75,37 @@ def test_a_password_at_the_byte_limit_works(client):
     assert client.post("/login", json={
         "username": "limitpw", "password": "a" * 72,
     }).status_code == 200
+
+
+def test_swagger_default_timestamps_do_not_crash(client, make_user):
+    """The example Swagger generates ends in Z, which Pydantic parses as a
+    timezone-aware value. Comparing that to datetime.now() used to raise
+    TypeError and return 500."""
+    from datetime import datetime, timedelta
+
+    patient, _ = make_user("p1")
+    _, doctor_id = make_user("d1", role="doctor")
+    start = (datetime.now() + timedelta(days=2)).replace(microsecond=0)
+
+    r = client.post("/appointments", headers=patient, json={
+        "doctor_id": doctor_id,
+        "start_time": start.isoformat() + "Z",
+        "end_time": (start + timedelta(hours=1)).isoformat() + "Z",
+    })
+    assert r.status_code in (201, 422), r.text
+    assert r.status_code != 500
+
+
+def test_a_timezone_offset_is_accepted(client, make_user):
+    from datetime import datetime, timedelta
+
+    patient, _ = make_user("p1")
+    _, doctor_id = make_user("d1", role="doctor")
+    start = (datetime.now() + timedelta(days=3)).replace(microsecond=0)
+
+    r = client.post("/appointments", headers=patient, json={
+        "doctor_id": doctor_id,
+        "start_time": start.isoformat() + "+02:00",
+        "end_time": (start + timedelta(hours=1)).isoformat() + "+02:00",
+    })
+    assert r.status_code != 500

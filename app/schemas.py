@@ -63,6 +63,20 @@ class AppointmentCreate(BaseModel):
     start_time: datetime
     end_time: datetime
 
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def drop_timezone(cls, value: datetime) -> datetime:
+        """Accept both '2026-09-01T10:00:00' and '2026-09-01T10:00:00Z'.
+
+        Swagger's generated example carries a Z, which Pydantic parses as a
+        timezone-aware value. The database stores naive local datetimes, so an
+        aware value is converted to local time and the offset dropped - without
+        this, comparing it to datetime.now() raises TypeError.
+        """
+        if value.tzinfo is not None:
+            value = value.astimezone().replace(tzinfo=None)
+        return value
+
     @model_validator(mode="after")
     def check_interval(self):
         if self.end_time <= self.start_time:
