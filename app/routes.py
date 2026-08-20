@@ -1,246 +1,256 @@
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.models import User, Doctor, Patient, Appointment
-from app.schemas import UserCreate, LoginSchema, AppointmentCreate
+
 from app.auth import hash_password, verify_password, create_token
-from app.dependencies import get_db, role_required, get_current_user
-from app.cache import get_cache, set_cache, delete_cache
+from app.cache import cached, delete_cache
+from app.dependencies import get_db, get_current_user, role_required
 from app.logger import logger
+from app.models import User, Appointment
+from app.monitor import metrics
+from app.schemas import (
+    UserCreate,
+    LoginSchema,
+    AppointmentCreate,
+    StatusUpdate,
+    UserOut,
+    AppointmentOut,
+)
 
 router = APIRouter()
 
-@router.post("/register")
-def register(data: UserCreate, db: Session = Depends(get_db)):
+
+def create_account(data: UserCreate, db: Session, role: str) -> User:
+    """Create a user with the given role, rejecting a username that is taken."""
+    if db.query(User).filter(User.username == data.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+
     user = User(
         username=data.username,
         email=data.email,
-        password=data.password,
-        role=data.role
+        password=hash_password(data.password),
+        role=role,
     )
     db.add(user)
     db.commit()
-    return {"msg": "registered"}
+    db.refresh(user)
+    return user
+
+
+def clear_schedule_cache(doctor_id: int, patient_id: int):
+    delete_cache(f"doctor_{doctor_id}_appointments", f"patient_{patient_id}_appointments")
+
+
+# ---------------------------------------------------------------- accounts
+
+@router.post("/register", status_code=201)
+def register(data: UserCreate, db: Session = Depends(get_db)):
+    """Public sign-up. Always creates a patient — staff accounts go through /admin/create-user."""
+    user = create_account(data, db, role="patient")
+    logger.info("Registered patient %s", user.username)
+    return {"msg": "registered", "id": user.id}
 
 
 @router.post("/login")
 def login(data: LoginSchema, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
-    if not user or not (data.password, user.password):
-        raise HTTPException(status_code=401)
 
-    token = create_token({"sub": user.username, "role": user.role})
-    return {"access_token": token}
+    if not user or not verify_password(data.password, user.password):
+        logger.warning("Failed login for %s", data.username)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    logger.info("Login ok for %s (%s)", user.username, user.role)
+    return {"access_token": create_token({"sub": user.username, "role": user.role})}
 
 
-@router.post("/appointments", dependencies=[Depends(role_required("patient"))])
-def book(data: AppointmentCreate, db: Session = Depends(get_db)):
+# ------------------------------------------------------------ appointments
 
-    existing = db.query(Appointment).filter(
+@router.post("/appointments", status_code=201)
+def book(
+    data: AppointmentCreate,
+    db: Session = Depends(get_db),
+    patient: User = Depends(role_required("patient")),
+):
+    doctor = db.query(User).filter(User.id == data.doctor_id, User.role == "doctor").first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    clash = db.query(Appointment).filter(
         Appointment.doctor_id == data.doctor_id,
+        Appointment.status != "Cancelled",
         Appointment.start_time < data.end_time,
-        Appointment.end_time > data.start_time
+        Appointment.end_time > data.start_time,
     ).first()
 
-    if existing:
-        raise HTTPException(status_code=400, detail="Invalid Double booking")
-    
+    if clash:
+        raise HTTPException(status_code=400, detail="Doctor is already booked at that time")
 
-    appt = Appointment(**data.dict())
-    appt.status = "Scheduled"  
-
+    appt = Appointment(
+        doctor_id=data.doctor_id,
+        patient_id=patient.id,
+        start_time=data.start_time,
+        end_time=data.end_time,
+        status="Scheduled",
+    )
     db.add(appt)
     db.commit()
+    db.refresh(appt)
 
-    delete_cache("appointments")
+    clear_schedule_cache(appt.doctor_id, appt.patient_id)
+    logger.info("Appointment %s booked: patient %s with doctor %s", appt.id, patient.id, doctor.id)
+    return {"msg": "booked", "id": appt.id}
 
-    logger.info("Appointment booked")
-    return {"msg": "booked"}
 
-@router.delete("/appointments/{id}",dependencies=[Depends(role_required("patient"))])
-def cancel_appointment(id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    appt = db.query(Appointment).filter(Appointment.id == id).first()
-
+@router.delete("/appointments/{appointment_id}")
+def cancel_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    patient: User = Depends(role_required("patient")),
+):
+    appt = db.query(Appointment).filter(Appointment.id == appointment_id).first()
     if not appt:
-        raise HTTPException(404)
+        raise HTTPException(status_code=404, detail="Appointment not found")
 
-    if appt.patient_id != current_user.id:
-        raise HTTPException(403, "Not allowed")
+    if appt.patient_id != patient.id:
+        raise HTTPException(status_code=403, detail="This is not your appointment")
 
     appt.status = "Cancelled"
     db.commit()
-    delete_cache("appointments")
+
+    clear_schedule_cache(appt.doctor_id, appt.patient_id)
+    logger.info("Appointment %s cancelled by patient %s", appt.id, patient.id)
     return {"msg": "cancelled"}
 
-@router.put("/appointments/{id}/status",dependencies=[Depends(role_required("doctor"))])
-def update_status(id: int, status: str,
-                  db: Session = Depends(get_db) ):
-    appt = db.query(Appointment).filter(Appointment.id == id).first()
 
+@router.put("/appointments/{appointment_id}/status")
+def update_status(
+    appointment_id: int,
+    data: StatusUpdate,
+    db: Session = Depends(get_db),
+    doctor: User = Depends(role_required("doctor")),
+):
+    appt = db.query(Appointment).filter(Appointment.id == appointment_id).first()
     if not appt:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="Appointment not found")
 
-    if status not in ["Scheduled", "Completed", "Cancelled"]:
-        raise HTTPException(status_code=400, detail="Invalid status")
+    if appt.doctor_id != doctor.id:
+        raise HTTPException(status_code=403, detail="This is not your appointment")
 
-    appt.status = status
+    appt.status = data.status
     db.commit()
 
-    delete_cache("appointments")
+    clear_schedule_cache(appt.doctor_id, appt.patient_id)
+    logger.info("Appointment %s set to %s by doctor %s", appt.id, data.status, doctor.id)
     return {"msg": "status updated"}
 
-@router.get("/appointments", dependencies=[Depends(role_required("admin"))])
+
+@router.get("/appointments", response_model=List[AppointmentOut],
+            dependencies=[Depends(role_required("admin"))])
 def all_appointments(db: Session = Depends(get_db)):
     return db.query(Appointment).all()
 
-@router.get("/doctors/{id}/appointments",dependencies=[Depends(role_required("doctor"))])
-def doctor_schedule(id: int, db: Session = Depends(get_db)):
-    cached = get_cache(f"doctor_{id}_appointments")
-    if cached:
-        return cached
 
-    data = db.query(Appointment).filter(Appointment.doctor_id == id).all()
+# --------------------------------------------------------------- schedules
 
-    result = [
-        {
-            "id": a.id,
-            "patient_id": a.patient_id,
-            "start": a.start_time,
-            "end": a.end_time,
-            "status": a.status
-        }
-        for a in data
-    ]
+@router.get("/doctors/{doctor_id}/appointments")
+def doctor_schedule(
+    doctor_id: int,
+    db: Session = Depends(get_db),
+    doctor: User = Depends(role_required("doctor")),
+):
+    if doctor_id != doctor.id:
+        raise HTTPException(status_code=403, detail="You can only view your own schedule")
 
-    set_cache(f"doctor_{id}_appointments", result)
-    return result
-@router.get("/patients/{id}/appointments",dependencies=[Depends(role_required("patient"))])
-def patient_schedule(id: int, db: Session = Depends(get_db)):
-    cached = get_cache(f"patient_{id}_appointments")
-    if cached:
-        return cached
+    def build():
+        rows = db.query(Appointment).filter(Appointment.doctor_id == doctor_id).all()
+        return [AppointmentOut.model_validate(a).model_dump() for a in rows]
 
-    data = db.query(Appointment).filter(Appointment.patient_id == id).all()
+    return cached(f"doctor_{doctor_id}_appointments", build)
 
-    result = [
-        {
-            "id": a.id,
-            "doctor_id": a.doctor_id,
-            "start": a.start_time,
-            "end": a.end_time,
-            "status": a.status
-        }
-        for a in data
-    ]
 
-    set_cache(f"patient_{id}_appointments", result)
-    return result
+@router.get("/patients/{patient_id}/appointments")
+def patient_schedule(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    patient: User = Depends(role_required("patient")),
+):
+    if patient_id != patient.id:
+        raise HTTPException(status_code=403, detail="You can only view your own schedule")
+
+    def build():
+        rows = db.query(Appointment).filter(Appointment.patient_id == patient_id).all()
+        return [AppointmentOut.model_validate(a).model_dump() for a in rows]
+
+    return cached(f"patient_{patient_id}_appointments", build)
+
+
+# ----------------------------------------------------------------- directories
+
 @router.get("/patients", dependencies=[Depends(role_required("admin"))])
 def get_patients(db: Session = Depends(get_db)):
+    def build():
+        rows = db.query(User).filter(User.role == "patient").all()
+        return [UserOut.model_validate(u).model_dump() for u in rows]
 
-    cached = get_cache("patients")  
-    if cached:
-        return cached
+    return cached("patients", build)
 
-    patients = db.query(User).filter(User.role == "patient").all()
 
-    result = [
-        {
-            "id": p.id,
-            "username": p.username,
-            "email": p.email
-        }
-        for p in patients
-    ]
-
-    set_cache("patients", result)  
-
-    return result
-@router.get("/patients/{id}", dependencies=[Depends(role_required("admin"))])
-def get_patient_by_id(id: int, db: Session = Depends(get_db)):
-
-    cache_key = f"patient_{id}"
-    cached = get_cache(cache_key)
-
-    if cached:
-        return cached
-
-    patient = db.query(User).filter(
-        User.id == id,
-        User.role == "patient"
-    ).first()
-
+@router.get("/patients/{patient_id}", response_model=UserOut,
+            dependencies=[Depends(role_required("admin"))])
+def get_patient_by_id(patient_id: int, db: Session = Depends(get_db)):
+    patient = db.query(User).filter(User.id == patient_id, User.role == "patient").first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    return patient
 
-    result = {
-        "id": patient.id,
-        "username": patient.username,
-        "email": patient.email
-    }
-
-    set_cache(cache_key, result)
-
-    return result
 
 @router.get("/doctors", dependencies=[Depends(role_required("admin"))])
 def get_doctors(db: Session = Depends(get_db)):
+    def build():
+        rows = db.query(User).filter(User.role == "doctor").all()
+        return [UserOut.model_validate(u).model_dump() for u in rows]
 
-    cached = get_cache("doctors")
-    if cached:
-        return cached
+    return cached("doctors", build)
 
-    doctors = db.query(User).filter(User.role == "doctor").all()
 
-    result = [
-        {
-            "id": d.id,
-            "username": d.username,
-            "email": d.email
-        }
-        for d in doctors
-    ]
+# --------------------------------------------------------------------- admin
 
-    set_cache("doctors", result)
-
-    return result
-@router.post("/admin/create-user", dependencies=[Depends(role_required("admin"))])
+@router.post("/admin/create-user", status_code=201,
+             dependencies=[Depends(role_required("admin"))])
 def create_user(data: UserCreate, db: Session = Depends(get_db)):
-    user = User(
-        username=data.username,
-        email=data.email,
-        password=data.password,
-        role=data.role
-    )
-    db.add(user)
-    db.commit()
+    user = create_account(data, db, role=data.role)
+    delete_cache("patients", "doctors")
+    logger.info("Admin created %s (%s)", user.username, user.role)
+    return {"msg": "created", "id": user.id}
 
-    delete_cache("patients")
-    delete_cache("doctors")
 
-    return {"msg": "created"}
-@router.delete("/admin/users/{id}", dependencies=[Depends(role_required("admin"))])
-def delete_user(id: int, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.id == id).first()
+@router.delete("/admin/users/{user_id}", dependencies=[Depends(role_required("admin"))])
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(404)
+        raise HTTPException(status_code=404, detail="User not found")
+
+    db.query(Appointment).filter(
+        (Appointment.patient_id == user_id) | (Appointment.doctor_id == user_id)
+    ).update({"status": "Cancelled"}, synchronize_session=False)
 
     db.delete(user)
     db.commit()
 
-    delete_cache("patients")
-    delete_cache("doctors")
-
+    delete_cache("patients", "doctors", f"doctor_{user_id}_appointments",
+                 f"patient_{user_id}_appointments")
+    logger.info("Admin deleted user %s", user_id)
     return {"msg": "deleted"}
-from app.monitor import metrics
 
-@router.get("/dashboard")
+
+@router.get("/dashboard", dependencies=[Depends(role_required("admin"))])
 def dashboard():
-    avg_time = 0
-    if metrics["requests"] > 0:
-        avg_time = metrics["total_time"] / metrics["requests"]
-
+    requests = metrics["requests"]
     return {
-        "total_requests": metrics["requests"],
+        "total_requests": requests,
         "error_count": metrics["errors"],
-        "avg_response_time": avg_time
+        "avg_response_time": round(metrics["total_time"] / requests, 4) if requests else 0,
+        "by_status": dict(metrics["by_status"]),
+        "top_endpoints": dict(metrics["by_path"].most_common(5)),
     }

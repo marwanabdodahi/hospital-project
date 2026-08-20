@@ -25,3 +25,13 @@ Thumbs.db
 # Editor directories
 .vscode/
 .idea/
+
+# Logs
+*.log
+
+# Database backups from migrate_db.py
+hospital.db.backup-*
+
+# Course paperwork and generated documentation (kept locally, not in the repo)
+docs/
+DSC-306-*.pdf

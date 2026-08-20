@@ -1,143 +1,87 @@
-from fastapi.testclient import TestClient
-from app.main import app
-
-client = TestClient(app)
+"""Registration, login and token handling."""
 
 
-def test_register_success():
-    response = client.post("/register", json={
-        "username": "testuser",
-        "email": "test@test.com",
-        "password": "123456",
-        "role": "patient"
+def test_register_creates_a_patient(client):
+    r = client.post("/register", json={
+        "username": "newpatient", "email": "new@test.com",
+        "password": "secret123", "role": "patient",
     })
-    assert response.status_code in [200, 400]
+    assert r.status_code == 201
 
 
-def test_register_duplicate():
+def test_register_rejects_duplicate_username(client):
+    body = {"username": "taken", "email": "a@test.com", "password": "secret123"}
+    assert client.post("/register", json=body).status_code == 201
+
+    r = client.post("/register", json=body)
+    assert r.status_code == 400
+    assert "already taken" in r.json()["detail"]
+
+
+def test_register_rejects_bad_email(client):
+    r = client.post("/register", json={
+        "username": "bademail", "email": "not-an-email", "password": "secret123",
+    })
+    assert r.status_code == 422
+
+
+def test_register_rejects_short_password(client):
+    r = client.post("/register", json={
+        "username": "shortpw", "email": "s@test.com", "password": "123",
+    })
+    assert r.status_code == 422
+
+
+def test_register_cannot_grant_admin(client, make_user):
+    """A public sign-up asking for admin must still come out as a patient."""
     client.post("/register", json={
-        "username": "duplicate",
-        "email": "dup@test.com",
-        "password": "123456",
-        "role": "patient"
+        "username": "sneaky", "email": "s@test.com",
+        "password": "secret123", "role": "admin",
     })
+    token = client.post("/login", json={
+        "username": "sneaky", "password": "secret123",
+    }).json()["access_token"]
 
-    response = client.post("/register", json={
-        "username": "duplicate",
-        "email": "dup@test.com",
-        "password": "123456",
-        "role": "patient"
-    })
-
-    assert response.status_code == 400
+    r = client.get("/patients", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403
 
 
-def test_login_success():
+def test_password_is_not_stored_in_plain_text(client, db_session):
+    from app.models import User
     client.post("/register", json={
-        "username": "loginuser",
-        "email": "login@test.com",
-        "password": "123456",
-        "role": "patient"
+        "username": "hashed", "email": "h@test.com", "password": "secret123",
     })
-
-    response = client.post("/login", json={
-        "username": "loginuser",
-        "password": "123456"
-    })
-
-    assert response.status_code == 200
-    assert "access_token" in response.json()
+    stored = db_session.query(User).filter(User.username == "hashed").first().password
+    assert stored != "secret123"
+    assert stored.startswith("$2b$")
 
 
-def test_login_wrong_password():
-    response = client.post("/login", json={
-        "username": "loginuser",
-        "password": "wrong"
-    })
-
-    assert response.status_code == 401
+def test_login_returns_a_token(client, make_user):
+    headers, _ = make_user("loginuser")
+    assert headers["Authorization"].startswith("Bearer ey")
 
 
-def get_token(username="patient1"):
-    client.post("/register", json={
-        "username": username,
-        "email": f"{username}@test.com",
-        "password": "123456",
-        "role": "patient"
-    })
-
-    login = client.post("/login", json={
-        "username": username,
-        "password": "123456"
-    })
-
-    return login.json()["access_token"]
+def test_login_rejects_wrong_password(client, make_user):
+    make_user("realuser", password="secret123")
+    r = client.post("/login", json={"username": "realuser", "password": "wrong"})
+    assert r.status_code == 401
 
 
-def test_protected_without_token():
-    response = client.get("/appointments")
-    assert response.status_code in [401, 403]
+def test_login_rejects_empty_password(client, make_user):
+    make_user("realuser2", password="secret123")
+    r = client.post("/login", json={"username": "realuser2", "password": ""})
+    assert r.status_code == 401
 
 
-def test_protected_with_token():
-    token = get_token()
-
-    response = client.get(
-        "/appointments",
-        headers={"Authorization": f"Bearer {token}"}
-    )
-
-    assert response.status_code in [200, 403]
+def test_login_rejects_unknown_user(client):
+    r = client.post("/login", json={"username": "ghost", "password": "secret123"})
+    assert r.status_code == 401
 
 
-def test_book_appointment():
-    token = get_token("patient_book")
-
-    data = {
-        "doctor_id": 1,
-        "patient_id": 1,
-        "start_time": "2025-05-01T10:00:00",
-        "end_time": "2025-05-01T11:00:00"
-    }
-
-    response = client.post(
-        "/appointments",
-        json=data,
-        headers={"Authorization": f"Bearer {token}"}
-    )
-
-    assert response.status_code in [200, 400]
+def test_protected_route_needs_a_token(client):
+    assert client.get("/appointments").status_code in (401, 403)
 
 
-def test_double_booking():
-    token = get_token("patient_double")
-
-    data = {
-        "doctor_id": 1,
-        "patient_id": 1,
-        "start_time": "2025-05-01T12:00:00",
-        "end_time": "2025-05-01T13:00:00"
-    }
-
-    client.post(
-        "/appointments",
-        json=data,
-        headers={"Authorization": f"Bearer {token}"}
-    )
-
-    response = client.post(
-        "/appointments",
-        json=data,
-        headers={"Authorization": f"Bearer {token}"}
-    )
-
-    assert response.status_code == 400
-
-
-def test_invalid_token():
-    response = client.get(
-        "/appointments",
-        headers={"Authorization": "Bearer invalidtoken"}
-    )
-
-    assert response.status_code == 401
+def test_invalid_token_is_rejected(client):
+    r = client.get("/appointments", headers={"Authorization": "Bearer notatoken"})
+    assert r.status_code == 401

@@ -55,7 +55,7 @@ user, and checks the role before the request handler runs.
 | Database | SQLite |
 | Validation | Pydantic |
 | Tokens | python-jose (HS256) |
-| Password hashing | passlib[bcrypt] |
+| Password hashing | bcrypt |
 | Cache | Redis (optional) |
 | Testing | pytest + httpx |
 
@@ -170,7 +170,7 @@ Send the token in the `Authorization` header on every protected request:
 curl -X POST http://127.0.0.1:8000/appointments \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
-  -d '{"doctor_id":1,"patient_id":1,"start_time":"2026-09-01T10:00:00","end_time":"2026-09-01T11:00:00"}'
+  -d '{"doctor_id":1,"start_time":"2026-09-01T10:00:00","end_time":"2026-09-01T11:00:00"}'
 ```
 
 ---
@@ -181,20 +181,50 @@ Full interactive documentation is generated automatically by FastAPI at `/docs`.
 
 | Method | Endpoint | Access | Description |
 |--------|----------|--------|-------------|
-| `POST` | `/register` | public | Create a user account |
+| `POST` | `/register` | public | Create a patient account |
 | `POST` | `/login` | public | Log in and receive a JWT |
 | `POST` | `/appointments` | patient | Book an appointment |
 | `DELETE` | `/appointments/{id}` | patient | Cancel own appointment |
 | `PUT` | `/appointments/{id}/status` | doctor | Update appointment status |
 | `GET` | `/appointments` | admin | List all appointments |
-| `GET` | `/doctors/{id}/appointments` | doctor | A doctor's schedule |
-| `GET` | `/patients/{id}/appointments` | patient | A patient's schedule |
+| `GET` | `/doctors/{id}/appointments` | doctor | Own schedule only |
+| `GET` | `/patients/{id}/appointments` | patient | Own schedule only |
 | `GET` | `/patients` | admin | List all patients |
 | `GET` | `/patients/{id}` | admin | Get one patient |
 | `GET` | `/doctors` | admin | List all doctors |
 | `POST` | `/admin/create-user` | admin | Create a user of any role |
 | `DELETE` | `/admin/users/{id}` | admin | Delete a user |
-| `GET` | `/dashboard` | public | Request, error, and latency metrics |
+| `GET` | `/dashboard` | admin | Request, error, and latency metrics |
+
+---
+
+## Security Notes
+
+- Passwords are stored as bcrypt hashes. They are never returned by any endpoint.
+- The JWT signing key is read from the `SECRET_KEY` environment variable. Set a real one
+  before running anywhere other than a local machine:
+
+  ```bash
+  export SECRET_KEY="a-long-random-string"
+  ```
+
+- `POST /register` always creates a **patient**. Doctor and administrator accounts can only
+  be created by an existing administrator through `POST /admin/create-user`.
+- Every route that takes an `id` checks that the id belongs to the caller, so a doctor
+  cannot read another doctor's schedule.
+
+### Upgrading an older database
+
+A database created before passwords were hashed still holds plain text. Run the migration
+once, from the project folder:
+
+```bash
+python migrate_db.py
+```
+
+It backs the file up first, hashes every plain-text password, normalises role names to
+lower case, and drops the two unused tables. Note the old passwords down before running it -
+they cannot be recovered afterwards.
 
 ---
 
@@ -205,8 +235,9 @@ source venv/bin/activate
 pytest tests/ -v
 ```
 
-The suite covers registration, login, token validation, role-based access, and
-double-booking prevention.
+The suite has 35 tests covering registration, login, password hashing, token validation,
+role-based access, schedule ownership, and double-booking prevention. Each test runs against
+its own temporary database, so `hospital.db` is never touched.
 
 ---
 
@@ -226,7 +257,11 @@ hospital-project/
 │   ├── logger.py         # Application logger
 │   └── monitor.py        # Request metrics
 ├── tests/
-│   └── test_auth.py      # Functional tests
+│   ├── conftest.py           # Test fixtures (isolated test database)
+│   ├── test_auth.py          # Registration, login, tokens
+│   ├── test_appointments.py  # Booking rules and double-booking
+│   └── test_access.py        # Role-based access control
+├── migrate_db.py         # One-time upgrade for a pre-hashing database
 ├── run_windows.bat       # One-click launcher (Windows)
 ├── تشغيل_المشروع.command  # One-click launcher (macOS)
 ├── requirements.txt
@@ -239,10 +274,11 @@ hospital-project/
 
 | Table | Description |
 |-------|-------------|
-| `users` | Identity records — username, email, password, role |
-| `doctors` | Doctor profiles, linked to `users` |
-| `patients` | Patient profiles, linked to `users` |
+| `users` | Identity records — username, email, hashed password, role |
 | `appointments` | Bookings — doctor, patient, start time, end time, status |
+
+Doctors and patients are both rows in `users`, told apart by the `role` column, so
+`appointments.doctor_id` and `appointments.patient_id` are both foreign keys to `users.id`.
 
 ---
 
