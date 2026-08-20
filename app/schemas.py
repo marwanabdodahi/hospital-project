@@ -19,7 +19,15 @@ Status = Literal["Scheduled", "Completed", "Cancelled"]
 
 class UserCreate(BaseModel):
     """Unknown fields are rejected so a typo fails loudly instead of being ignored."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {
+            "username": "newpatient",
+            "email": "patient@example.com",
+            "password": "secret123",
+            "role": "patient",
+        }},
+    )
 
     username: str = Field(min_length=3, max_length=30)
     email: EmailStr
@@ -56,6 +64,10 @@ class UserCreate(BaseModel):
 
 
 class LoginSchema(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"username": "admin", "password": "admin12345"}}
+    )
+
     username: str
     password: str
 
@@ -65,8 +77,29 @@ class LoginSchema(BaseModel):
         return value.strip().lower()
 
 
+def _example_slot():
+    """A valid interval for the Swagger example, so pressing Execute works.
+
+    The generated default is the current time, which is already in the past by
+    the time the button is pressed, and it carries a Z that has to be parsed.
+    """
+    start = (datetime.now() + timedelta(days=7)).replace(
+        hour=10, minute=0, second=0, microsecond=0)
+    return start.isoformat(), (start + timedelta(hours=1)).isoformat()
+
+
+_START, _END = _example_slot()
+
+
 class AppointmentCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {
+            "doctor_id": 1,
+            "start_time": _START,
+            "end_time": _END,
+        }},
+    )
 
     doctor_id: int = Field(gt=0)
     start_time: datetime
@@ -104,7 +137,10 @@ class AppointmentCreate(BaseModel):
 
 
 class StatusUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"example": {"status": "Completed"}},
+    )
 
     status: Status
 
