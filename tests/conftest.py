@@ -46,6 +46,19 @@ def client(db_session):
 
 
 @pytest.fixture()
+def slot():
+    """A valid future interval, since booking in the past is rejected."""
+    from datetime import datetime, timedelta
+    start = (datetime.now() + timedelta(days=7)).replace(microsecond=0)
+
+    def _slot(hour_offset=0, hours=1):
+        s = start + timedelta(hours=hour_offset)
+        return {"start_time": s.isoformat(), "end_time": (s + timedelta(hours=hours)).isoformat()}
+
+    return _slot
+
+
+@pytest.fixture()
 def make_user(client, db_session):
     """Create a user of any role. Returns (auth_headers, user_id)."""
     def _make(username, role="patient", password="secret123"):

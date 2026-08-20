@@ -212,6 +212,23 @@ Full interactive documentation is generated automatically by FastAPI at `/docs`.
   be created by an existing administrator through `POST /admin/create-user`.
 - Every route that takes an `id` checks that the id belongs to the caller, so a doctor
   cannot read another doctor's schedule.
+- Usernames and emails are stored trimmed and lower case, so `Ahmed` and `ahmed` are one
+  account rather than two.
+- Passwords are limited to 72 bytes, which is bcrypt's own limit. Non-Latin characters use
+  more than one byte each, so an Arabic password reaches it in about 36 characters.
+
+### First run
+
+On an empty database the API creates a starting administrator, because public
+registration only makes patients and creating staff requires an administrator:
+
+| Username | Password |
+|----------|----------|
+| `admin` | `admin12345` |
+
+Change it after the first login, or set `ADMIN_USERNAME` and `ADMIN_PASSWORD`
+before the first start. For a presentation, `python seed.py` adds two doctors,
+two patients and sample appointments (all using the password `demo12345`).
 
 ### Upgrading an older database
 
@@ -228,6 +245,20 @@ they cannot be recovered afterwards.
 
 ---
 
+## Business Rules
+
+| Rule | Behaviour |
+|------|-----------|
+| Double booking | A doctor cannot hold two active appointments whose intervals overlap. Cancelled appointments free their slot. |
+| Restoring a cancellation | A cancelled appointment can be set back to `Scheduled` only while its slot is still free. |
+| Concurrency | The overlap check and the insert are held under one lock, so simultaneous requests for the same slot cannot both succeed. |
+| Past dates | An appointment cannot start in the past. |
+| Duration | An appointment cannot run longer than four hours. |
+| Lifecycle | `Scheduled` → `Completed` or `Cancelled`; either can return to `Scheduled`. Only a scheduled appointment can be cancelled. |
+| Cancellation rights | A patient cancels their own, a doctor cancels theirs, an administrator cancels any. |
+
+---
+
 ## Running the Tests
 
 ```bash
@@ -235,8 +266,9 @@ source venv/bin/activate
 pytest tests/ -v
 ```
 
-The suite has 35 tests covering registration, login, password hashing, token validation,
-role-based access, schedule ownership, and double-booking prevention. Each test runs against
+The suite has 54 tests covering registration, login, password hashing, token validation,
+role-based access, schedule ownership, double-booking prevention, the appointment
+lifecycle, input normalisation, and the first-administrator bootstrap. Each test runs against
 its own temporary database, so `hospital.db` is never touched.
 
 ---
@@ -261,7 +293,8 @@ hospital-project/
 │   ├── test_auth.py          # Registration, login, tokens
 │   ├── test_appointments.py  # Booking rules and double-booking
 │   └── test_access.py        # Role-based access control
-├── migrate_db.py         # One-time upgrade for a pre-hashing database
+├── migrate_db.py         # One-time upgrade for a database from an earlier version
+├── seed.py               # Demo data for a presentation
 ├── run_windows.bat       # One-click launcher (Windows)
 ├── تشغيل_المشروع.command  # One-click launcher (macOS)
 ├── requirements.txt
